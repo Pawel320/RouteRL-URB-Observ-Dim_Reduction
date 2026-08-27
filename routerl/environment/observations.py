@@ -1070,3 +1070,100 @@ class TripInfoWithETASumo(TripInfoWithETAMaskNorm):
         full_obs = np.concatenate([np.array(base_obs, dtype=np.float32), edge_vec])
         self.observations[str(agent_id)] = full_obs.copy()
         return full_obs
+
+
+from sklearn.decomposition import PCA
+import numpy as np
+from typing import List, Any
+
+class TripInfoWithETAPCA(TripInfoWithETASumo):
+    """
+    Extends TripInfoWithETASumo by applying PCA to reduce the 
+    high-dimensional SUMO edge snapshot (8051+) down to a smaller latent space (e.g., 35).
+    """
+
+    def __init__(
+        self,
+        *args,
+        n_components: int = 35,
+        **kwargs
+    ) -> None:
+        # 1. Definiujemy parametry NAJPIERW, by nadpisany reset_observation() nie wybuchł w klasie bazowej
+        self.n_components = n_components
+        self.pca = PCA(n_components=self.n_components)
+        self.is_fitted = False
+
+        # 2. Wywołujemy klasę bazową (która odpali nasz reset_observation w tle)
+        super().__init__(*args, **kwargs)
+
+        # 3. Aktualizujemy ostateczny rozmiar obserwacji dla przestrzeni Gym
+        self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
+        
+        # 4. Resetujemy jeszcze raz dla absolutnej pewności z właściwym OBS_SIZE
+        self.observations = self.reset_observation()
+
+    def refresh_edge_metadata(self):
+        """
+        Nadpisujemy metodę z klasy bazowej. 
+        Pozwalamy jej pobrać metadane o mapie (żeby wiedziała ile jest krawędzi),
+        ale stanowczo przywracamy nasz zredukowany rozmiar obserwacji!
+        """
+        super().refresh_edge_metadata()
+        self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
+
+    def reset_observation(self) -> dict:
+        """Nadpisuje reset, aby zgadzał się nowy rozmiar wektora (Base + PCA components)."""
+        base_obs = super(TripInfoWithETASumo, self).reset_observation()  # Zwróć uwagę, że uderzamy poziom wyżej, żeby pominąć 8051 krawędzi
+        if self.edge_vec_len == 0:
+            return base_obs
+
+        obs = {}
+        for k, v in base_obs.items():
+            # v to wektor połączony. Ucinamy go do samej bazy i dodajemy n_components zer dla PCA
+            base_part = np.array(v, dtype=np.float32)[:self.BASE_OBS_SIZE]
+            pca_pad = np.zeros(self.n_components, dtype=np.float32)
+            obs[k] = np.concatenate([base_part, pca_pad])
+            
+        self.observations = obs
+        return obs
+
+    def agent_observations(self, agent_id: str, all_agents: List[Any], agent_selection: str, travel_times: List[Any]) -> np.ndarray:
+        # 1. Pobieramy pełną obserwację z klasy macierzystej (zawiera surowe 8051 wymiarów)
+        full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
+        
+        if self.edge_vec_len == 0:
+            return np.array(full_obs, dtype=np.float32)
+
+        # Rozdzielamy na część bazową (ETA, start_time itp.) oraz surową "Bestię" z krawędzi SUMO
+        base_obs_len = len(full_obs) - self.edge_vec_len
+        base_obs = full_obs[:base_obs_len]
+        edge_vec = full_obs[base_obs_len:]
+
+        if not hasattr(self, 'collected_raw_data'):
+            self.collected_raw_data = []
+        
+        # Przy każdym zapytaniu agenta o obserwację "łapiemy" stan sieci i doklejamy go do listy
+        self.collected_raw_data.append(edge_vec)
+
+        # Co 500 zrobionych obserwacji zrzucamy zebrane dane z pamięci RAM do pliku na dysku
+        if len(self.collected_raw_data) % 500 == 0:
+            np.save("surowe_dane_sumo.npy", np.array(self.collected_raw_data))
+            print(f"✅ Zapisano {len(self.collected_raw_data)} próbek do pliku surowe_dane_sumo.npy")
+
+        # 2. Obsługa PCA w locie
+        edge_vec_2d = edge_vec.reshape(1, -1)
+        
+        if not self.is_fitted:
+            # Na pierwszym uruchomieniu "oszukujemy" PCA, dopasowując go wstępnie do pojedynczej próbki 
+            # (w realnym treningu lepiej to fittować na danych zebranych z rozgrzewki, ale tu zadziała jako prosty placeholder)
+            dummy_matrix = np.vstack([edge_vec_2d] * max(2, self.n_components))
+            self.pca.fit(dummy_matrix)
+            self.is_fitted = True
+
+        reduced_edge_vec = self.pca.transform(edge_vec_2d).flatten()
+
+        # 3. Sklejamy bazę z zredukowanym wektorem PCA
+        final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), reduced_edge_vec])
+        self.observations[str(agent_id)] = final_obs.copy()
+        
+        return final_obs

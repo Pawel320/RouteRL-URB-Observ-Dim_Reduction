@@ -41,6 +41,7 @@ class Keychain:
     ROUTE_CONGESTION = "route_congestion"
     TRIP_INFO_ETA_SUMO = "trip_info_eta_sumo"
     GROUP_VICINITY = "group_vicinity"
+    TRIP_INFO_ETA_PCA = "trip_info_with_eta_pca"
 
     ### Environment
     NUMBER_OF_DAYS = "number_of_days"

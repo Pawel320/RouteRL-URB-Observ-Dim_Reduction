@@ -364,6 +364,7 @@ class TrafficEnvironment(AECEnv):
             kc.TRIP_INFO_ETA_SUMO,
             kc.TRIP_INFO_ETA_ROUTE_CONGESTION,
             kc.ROUTE_CONGESTION,
+            "trip_info_with_eta_pca",
         }
         self.simulator = SumoSimulator(
             self.simulation_params,
@@ -1054,6 +1055,17 @@ class TrafficEnvironment(AECEnv):
             )
         elif observation_type == kc.TRIP_INFO_ETA_SUMO:
             return TripInfoWithETASumo(
+                self.machine_agents,
+                self.human_agents,
+                self.simulation_params,
+                self.agent_params,
+                self.get_free_flow_times(invalid_pad=1e9),
+                self.simulator,
+                action_masks=self.action_masks,
+                include_action_mask_in_obs=self.use_action_masks
+            )
+        elif observation_type == "trip_info_with_eta_pca":
+            return TripInfoWithETAPCA(
                 self.machine_agents,
                 self.human_agents,
                 self.simulation_params,
