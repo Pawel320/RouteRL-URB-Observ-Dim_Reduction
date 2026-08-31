@@ -1076,51 +1076,34 @@ from sklearn.decomposition import PCA
 import numpy as np
 from typing import List, Any
 
+import joblib
+
 class TripInfoWithETAPCA(TripInfoWithETASumo):
-    """
-    Extends TripInfoWithETASumo by applying PCA to reduce the 
-    high-dimensional SUMO edge snapshot (8051+) down to a smaller latent space (e.g., 35).
-    """
-
-    def __init__(
-        self,
-        *args,
-        n_components: int = 35,
-        **kwargs
-    ) -> None:
-        # 1. Definiujemy parametry NAJPIERW, by nadpisany reset_observation() nie wybuchł w klasie bazowej
+    def __init__(self, *args, n_components: int = 35, **kwargs) -> None:
         self.n_components = n_components
-        self.pca = PCA(n_components=self.n_components)
-        self.is_fitted = False
-
-        # 2. Wywołujemy klasę bazową (która odpali nasz reset_observation w tle)
-        super().__init__(*args, **kwargs)
-
-        # 3. Aktualizujemy ostateczny rozmiar obserwacji dla przestrzeni Gym
-        self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
         
-        # 4. Resetujemy jeszcze raz dla absolutnej pewności z właściwym OBS_SIZE
+        # Ładujemy model z folderu results
+        pca_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../results/trained_pca_model.pkl"))
+        if not os.path.exists(pca_path):
+            raise FileNotFoundError(f"Brak modelu PCA: {pca_path}")
+            
+        self.pca = joblib.load(pca_path)
+        super().__init__(*args, **kwargs)
+        self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
         self.observations = self.reset_observation()
 
     def refresh_edge_metadata(self):
-        """
-        Nadpisujemy metodę z klasy bazowej. 
-        Pozwalamy jej pobrać metadane o mapie (żeby wiedziała ile jest krawędzi),
-        ale stanowczo przywracamy nasz zredukowany rozmiar obserwacji!
-        """
         super().refresh_edge_metadata()
         if hasattr(self, 'BASE_OBS_SIZE'):
             self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
 
     def reset_observation(self) -> dict:
-        """Nadpisuje reset, aby zgadzał się nowy rozmiar wektora (Base + PCA components)."""
-        base_obs = super(TripInfoWithETASumo, self).reset_observation()  # Zwróć uwagę, że uderzamy poziom wyżej, żeby pominąć 8051 krawędzi
+        base_obs = super(TripInfoWithETASumo, self).reset_observation()
         if self.edge_vec_len == 0:
             return base_obs
 
         obs = {}
         for k, v in base_obs.items():
-            # v to wektor połączony. Ucinamy go do samej bazy i dodajemy n_components zer dla PCA
             base_part = np.array(v, dtype=np.float32)[:self.BASE_OBS_SIZE]
             pca_pad = np.zeros(self.n_components, dtype=np.float32)
             obs[k] = np.concatenate([base_part, pca_pad])
@@ -1129,50 +1112,17 @@ class TripInfoWithETAPCA(TripInfoWithETASumo):
         return obs
 
     def agent_observations(self, agent_id: str, all_agents: List[Any], agent_selection: str, travel_times: List[Any]) -> np.ndarray:
-        try:
-            # 1. Pobieramy pełną obserwację z klasy macierzystej
-            full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
-            
-            if self.edge_vec_len == 0:
-                return np.array(full_obs, dtype=np.float32)
+        full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
+        if self.edge_vec_len == 0:
+            return np.array(full_obs, dtype=np.float32)
 
-            # Rozdzielamy na bazę i wektor krawędzi
-            base_obs_len = len(full_obs) - self.edge_vec_len
-            base_obs = full_obs[:base_obs_len]
-            edge_vec = full_obs[base_obs_len:]
+        base_obs_len = len(full_obs) - self.edge_vec_len
+        base_obs = full_obs[:base_obs_len]
+        edge_vec = full_obs[base_obs_len:]
 
-            if not hasattr(self, 'collected_raw_data'):
-                self.collected_raw_data = []
-            
-            self.collected_raw_data.append(edge_vec)
-
-            # ZAPISUJEMY CO KROK! Nawet jak wybuchnie na 5. agencie, mamy 4 próbki na dysku.
-            np.save("surowe_dane_sumo.npy", np.array(self.collected_raw_data, dtype=np.float32))
-            
-            if len(self.collected_raw_data) <= 3 or len(self.collected_raw_data) % 50 == 0:
-                print(f"✅ Zapisano próbkę nr {len(self.collected_raw_data)} do surowe_dane_sumo.npy")
-
-            # 2. Obsługa PCA z dodanym SZUMEM (żeby uniknąć błędu zerowej wariancji)
-            edge_vec_2d = edge_vec.reshape(1, -1)
-            
-            if not self.is_fitted:
-                dummy_matrix = np.vstack([edge_vec_2d] * max(2, self.n_components))
-                # Dodajemy mikro-szum, żeby sklearn nie zwariował od identycznych wierszy
-                dummy_matrix += np.random.normal(0, 0.001, dummy_matrix.shape)
-                self.pca.fit(dummy_matrix)
-                self.is_fitted = True
-
-            reduced_edge_vec = self.pca.transform(edge_vec_2d).flatten().astype(np.float32)
-
-            # 3. Sklejamy i zwracamy
-            final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), reduced_edge_vec]).astype(np.float32)
-            self.observations[str(agent_id)] = final_obs.copy()
-            
-            return final_obs
-
-        except Exception as e:
-            # TEN BLOK ZŁAPIE I WYDRUKUJE PRAWDZIWY BŁĄD ZANIM TORCHRL GO UKRYJE
-            print(f"🔥🔥🔥 KRYTYCZNY BŁĄD W AGENT_OBSERVATIONS: {e}")
-            import traceback
-            traceback.print_exc()
-            raise e
+        # Transformacja PCA w locie
+        reduced_edge_vec = self.pca.transform(edge_vec.reshape(1, -1)).flatten().astype(np.float32)
+        final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), reduced_edge_vec]).astype(np.float32)
+        
+        self.observations[str(agent_id)] = final_obs.copy()
+        return final_obs
