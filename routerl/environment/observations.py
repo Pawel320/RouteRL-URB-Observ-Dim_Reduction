@@ -1146,25 +1146,25 @@ class TripInfoWithETAPCA(TripInfoWithETASumo):
         # Przy każdym zapytaniu agenta o obserwację "łapiemy" stan sieci i doklejamy go do listy
         self.collected_raw_data.append(edge_vec)
 
-        # Co 500 zrobionych obserwacji zrzucamy zebrane dane z pamięci RAM do pliku na dysku
-        if len(self.collected_raw_data) % 500 == 0:
-            np.save("surowe_dane_sumo.npy", np.array(self.collected_raw_data))
+        # Zmniejszamy próg do 50, żeby szybciej dostać plik!
+        if len(self.collected_raw_data) % 50 == 0:
+            # Zapisujemy na bieżąco, wymuszając float32 żeby zajmowało mniej miejsca
+            np.save("surowe_dane_sumo.npy", np.array(self.collected_raw_data, dtype=np.float32))
             print(f"✅ Zapisano {len(self.collected_raw_data)} próbek do pliku surowe_dane_sumo.npy")
 
         # 2. Obsługa PCA w locie
         edge_vec_2d = edge_vec.reshape(1, -1)
         
         if not self.is_fitted:
-            # Na pierwszym uruchomieniu "oszukujemy" PCA, dopasowując go wstępnie do pojedynczej próbki 
-            # (w realnym treningu lepiej to fittować na danych zebranych z rozgrzewki, ale tu zadziała jako prosty placeholder)
             dummy_matrix = np.vstack([edge_vec_2d] * max(2, self.n_components))
             self.pca.fit(dummy_matrix)
             self.is_fitted = True
 
-        reduced_edge_vec = self.pca.transform(edge_vec_2d).flatten()
+        # KLUCZOWE: Wymuszamy float32 po wyjściu z PCA!
+        reduced_edge_vec = self.pca.transform(edge_vec_2d).flatten().astype(np.float32)
 
-        # 3. Sklejamy bazę z zredukowanym wektorem PCA
-        final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), reduced_edge_vec])
+        # 3. Sklejamy bazę z zredukowanym wektorem PCA i dla pewności znów float32
+        final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), reduced_edge_vec]).astype(np.float32)
         self.observations[str(agent_id)] = final_obs.copy()
         
         return final_obs
