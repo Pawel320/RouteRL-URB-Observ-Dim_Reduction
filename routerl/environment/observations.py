@@ -1109,7 +1109,8 @@ class TripInfoWithETAPCA(TripInfoWithETASumo):
         ale stanowczo przywracamy nasz zredukowany rozmiar obserwacji!
         """
         super().refresh_edge_metadata()
-        self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
+        if hasattr(self, 'BASE_OBS_SIZE'):
+            self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
 
     def reset_observation(self) -> dict:
         """Nadpisuje reset, aby zgadzał się nowy rozmiar wektora (Base + PCA components)."""
