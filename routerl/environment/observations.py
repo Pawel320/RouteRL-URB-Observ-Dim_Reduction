@@ -1129,42 +1129,50 @@ class TripInfoWithETAPCA(TripInfoWithETASumo):
         return obs
 
     def agent_observations(self, agent_id: str, all_agents: List[Any], agent_selection: str, travel_times: List[Any]) -> np.ndarray:
-        # 1. Pobieramy pełną obserwację z klasy macierzystej (zawiera surowe 8051 wymiarów)
-        full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
-        
-        if self.edge_vec_len == 0:
-            return np.array(full_obs, dtype=np.float32)
+        try:
+            # 1. Pobieramy pełną obserwację z klasy macierzystej
+            full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
+            
+            if self.edge_vec_len == 0:
+                return np.array(full_obs, dtype=np.float32)
 
-        # Rozdzielamy na część bazową (ETA, start_time itp.) oraz surową "Bestię" z krawędzi SUMO
-        base_obs_len = len(full_obs) - self.edge_vec_len
-        base_obs = full_obs[:base_obs_len]
-        edge_vec = full_obs[base_obs_len:]
+            # Rozdzielamy na bazę i wektor krawędzi
+            base_obs_len = len(full_obs) - self.edge_vec_len
+            base_obs = full_obs[:base_obs_len]
+            edge_vec = full_obs[base_obs_len:]
 
-        if not hasattr(self, 'collected_raw_data'):
-            self.collected_raw_data = []
-        
-        # Przy każdym zapytaniu agenta o obserwację "łapiemy" stan sieci i doklejamy go do listy
-        self.collected_raw_data.append(edge_vec)
+            if not hasattr(self, 'collected_raw_data'):
+                self.collected_raw_data = []
+            
+            self.collected_raw_data.append(edge_vec)
 
-        # Zmniejszamy próg do 50, żeby szybciej dostać plik!
-        if len(self.collected_raw_data) % 50 == 0:
-            # Zapisujemy na bieżąco, wymuszając float32 żeby zajmowało mniej miejsca
+            # ZAPISUJEMY CO KROK! Nawet jak wybuchnie na 5. agencie, mamy 4 próbki na dysku.
             np.save("surowe_dane_sumo.npy", np.array(self.collected_raw_data, dtype=np.float32))
-            print(f"✅ Zapisano {len(self.collected_raw_data)} próbek do pliku surowe_dane_sumo.npy")
+            
+            if len(self.collected_raw_data) <= 3 or len(self.collected_raw_data) % 50 == 0:
+                print(f"✅ Zapisano próbkę nr {len(self.collected_raw_data)} do surowe_dane_sumo.npy")
 
-        # 2. Obsługa PCA w locie
-        edge_vec_2d = edge_vec.reshape(1, -1)
-        
-        if not self.is_fitted:
-            dummy_matrix = np.vstack([edge_vec_2d] * max(2, self.n_components))
-            self.pca.fit(dummy_matrix)
-            self.is_fitted = True
+            # 2. Obsługa PCA z dodanym SZUMEM (żeby uniknąć błędu zerowej wariancji)
+            edge_vec_2d = edge_vec.reshape(1, -1)
+            
+            if not self.is_fitted:
+                dummy_matrix = np.vstack([edge_vec_2d] * max(2, self.n_components))
+                # Dodajemy mikro-szum, żeby sklearn nie zwariował od identycznych wierszy
+                dummy_matrix += np.random.normal(0, 0.001, dummy_matrix.shape)
+                self.pca.fit(dummy_matrix)
+                self.is_fitted = True
 
-        # KLUCZOWE: Wymuszamy float32 po wyjściu z PCA!
-        reduced_edge_vec = self.pca.transform(edge_vec_2d).flatten().astype(np.float32)
+            reduced_edge_vec = self.pca.transform(edge_vec_2d).flatten().astype(np.float32)
 
-        # 3. Sklejamy bazę z zredukowanym wektorem PCA i dla pewności znów float32
-        final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), reduced_edge_vec]).astype(np.float32)
-        self.observations[str(agent_id)] = final_obs.copy()
-        
-        return final_obs
+            # 3. Sklejamy i zwracamy
+            final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), reduced_edge_vec]).astype(np.float32)
+            self.observations[str(agent_id)] = final_obs.copy()
+            
+            return final_obs
+
+        except Exception as e:
+            # TEN BLOK ZŁAPIE I WYDRUKUJE PRAWDZIWY BŁĄD ZANIM TORCHRL GO UKRYJE
+            print(f"🔥🔥🔥 KRYTYCZNY BŁĄD W AGENT_OBSERVATIONS: {e}")
+            import traceback
+            traceback.print_exc()
+            raise e
