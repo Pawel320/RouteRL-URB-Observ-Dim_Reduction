@@ -1083,7 +1083,7 @@ class TripInfoWithETAPCA(TripInfoWithETASumo):
         self.n_components = n_components
         
         # Ładujemy model z folderu results
-        pca_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../results/trained_pca_model.pkl"))
+        pca_path = "/home/z1201158/URB_Dim_Reduction/URB/results/trained_pca_model.pkl"        
         if not os.path.exists(pca_path):
             raise FileNotFoundError(f"Brak modelu PCA: {pca_path}")
             
