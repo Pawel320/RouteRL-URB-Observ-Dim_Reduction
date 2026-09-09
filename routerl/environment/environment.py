@@ -365,6 +365,9 @@ class TrafficEnvironment(AECEnv):
             kc.TRIP_INFO_ETA_ROUTE_CONGESTION,
             kc.ROUTE_CONGESTION,
             "trip_info_with_eta_pca",
+            "private_only",
+            "pca_only",
+            "private_top7",
         }
         self.simulator = SumoSimulator(
             self.simulation_params,
@@ -1075,6 +1078,42 @@ class TrafficEnvironment(AECEnv):
                 action_masks=self.action_masks,
                 include_action_mask_in_obs=self.use_action_masks
             )
+        # ==========================================
+        # DODANE KLASY DO BADAŃ ABLACYJNYCH (PCA)
+        # ==========================================
+        elif observation_type == "private_only":
+            return ObservationPrivateOnly(
+                self.machine_agents,
+                self.human_agents,
+                self.simulation_params,
+                self.agent_params,
+                self.get_free_flow_times(invalid_pad=1e9),
+                action_masks=self.action_masks,
+                include_action_mask_in_obs=self.use_action_masks
+            )
+        elif observation_type == "pca_only":
+            return ObservationPCAOnly(
+                self.machine_agents,
+                self.human_agents,
+                self.simulation_params,
+                self.agent_params,
+                self.get_free_flow_times(invalid_pad=1e9),
+                self.simulator,
+                action_masks=self.action_masks,
+                include_action_mask_in_obs=self.use_action_masks
+            )
+        elif observation_type == "private_top7":
+            return ObservationPrivateAndTop7PCA(
+                self.machine_agents,
+                self.human_agents,
+                self.simulation_params,
+                self.agent_params,
+                self.get_free_flow_times(invalid_pad=1e9),
+                self.simulator,
+                action_masks=self.action_masks,
+                include_action_mask_in_obs=self.use_action_masks
+            )
+        # ==========================================
         else:
             raise ValueError('[MODEL INVALID] Unrecognized observation type: ' + observation_type)
 
