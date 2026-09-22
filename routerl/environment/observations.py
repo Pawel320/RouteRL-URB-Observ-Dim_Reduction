@@ -1139,7 +1139,6 @@ class ObservationPrivateOnly(TripInfoWithETAMaskNorm):
     """
     pass
 
-
 class ObservationPCAOnly(TripInfoWithETAPCA):
     """
     Tylko skompresowane dane PCA ze środowiska (rozmiar: 35).
@@ -1151,6 +1150,13 @@ class ObservationPCAOnly(TripInfoWithETAPCA):
         self.OBS_SIZE = self.n_components 
         self.observations = self.reset_observation()
 
+    def refresh_edge_metadata(self) -> None:
+        # Pozwalamy klasie bazowej odświeżyć graf krawędzi SUMO
+        if hasattr(super(), 'refresh_edge_metadata'):
+            super().refresh_edge_metadata()
+        # BLOKADA: Zabraniamy powrotu do 42 wymiarów i wymuszamy nasze 35!
+        self.OBS_SIZE = self.n_components
+
     def reset_observation(self) -> dict:
         obs = super().reset_observation()
         for k, v in obs.items():
@@ -1160,7 +1166,7 @@ class ObservationPCAOnly(TripInfoWithETAPCA):
         self.observations = obs
         return obs
 
-    def agent_observations(self, agent_id: str, all_agents: List[Any], agent_selection: str, travel_times: List[Any]) -> np.ndarray:
+    def agent_observations(self, agent_id: str, all_agents: list, agent_selection: str, travel_times: list) -> np.ndarray:
         full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
         pca_obs = full_obs[self.BASE_OBS_SIZE:]
         
@@ -1170,14 +1176,24 @@ class ObservationPCAOnly(TripInfoWithETAPCA):
 
 class ObservationPrivateAndTop7PCA(TripInfoWithETAPCA):
     """
-    Prywatne dane (7) + 7 najlepszych komponentów PCA (rozmiar: 14).
+    Prywatne cechy (7) + tylko 7 najważniejszych komponentów PCA. Łączny rozmiar: 14.
     """
     def __init__(self, *args, **kwargs) -> None:
+        # 1. NAJPIERW DEKLARUJESZ ZMIENNĄ (naprawia AttributeError)
+        self.top_n = 7 
+        
+        # 2. WYWOŁUJESZ KONSTRUKTOR BAZOWY
         super().__init__(*args, **kwargs)
-        self.top_n = 7
-        # Rozmiar: 7 bazowych + 7 top PCA = 14
-        self.OBS_SIZE = self.BASE_OBS_SIZE + self.top_n 
+        
+        # 3. ZMIENIASZ ROZMIAR (Prywatne 7 + Top 7 = 14)
+        self.OBS_SIZE = self.BASE_OBS_SIZE + self.top_n
         self.observations = self.reset_observation()
+
+    def refresh_edge_metadata(self) -> None:
+        if hasattr(super(), 'refresh_edge_metadata'):
+            super().refresh_edge_metadata()
+        # BLOKADA przed powrotem do 42 wymiarów (naprawia RuntimeError w TorchRL)
+        self.OBS_SIZE = self.BASE_OBS_SIZE + self.top_n
 
     def reset_observation(self) -> dict:
         obs = super().reset_observation()
@@ -1188,11 +1204,11 @@ class ObservationPrivateAndTop7PCA(TripInfoWithETAPCA):
         self.observations = obs
         return obs
 
-    def agent_observations(self, agent_id: str, all_agents: List[Any], agent_selection: str, travel_times: List[Any]) -> np.ndarray:
+    def agent_observations(self, agent_id: str, all_agents: list, agent_selection: str, travel_times: list) -> np.ndarray:
         full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
         base = full_obs[:self.BASE_OBS_SIZE]
         pca_top = full_obs[self.BASE_OBS_SIZE : self.BASE_OBS_SIZE + self.top_n]
-        
         final_obs = np.concatenate([base, pca_top])
+        
         self.observations[str(agent_id)] = final_obs.copy()
         return final_obs
