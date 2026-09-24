@@ -1192,8 +1192,10 @@ class ObservationPrivateAndTop7PCA(TripInfoWithETAPCA):
     def refresh_edge_metadata(self) -> None:
         if hasattr(super(), 'refresh_edge_metadata'):
             super().refresh_edge_metadata()
-        # BLOKADA przed powrotem do 42 wymiarów (naprawia RuntimeError w TorchRL)
-        self.OBS_SIZE = self.BASE_OBS_SIZE + self.top_n
+            
+        # ZABEZPIECZENIE: Zmieniamy wymiar tylko, jeśli konstruktor bazy już utworzył tę zmienną
+        if hasattr(self, 'BASE_OBS_SIZE'):
+            self.OBS_SIZE = self.BASE_OBS_SIZE + self.top_n
 
     def reset_observation(self) -> dict:
         obs = super().reset_observation()
