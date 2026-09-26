@@ -368,6 +368,8 @@ class TrafficEnvironment(AECEnv):
             "private_only",
             "pca_only",
             "private_top7",
+            kc.OBS_PRIVATE_AND_AE,
+            kc.OBS_AE_ONLY
         }
         self.simulator = SumoSimulator(
             self.simulation_params,
