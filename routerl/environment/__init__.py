@@ -16,5 +16,12 @@ from .observations import TripInfoWithETAMaskNorm
 from .observations import TripInfoWithETASumo
 from .observations import TripInfoWithETARouteCongestion
 from .observations import RouteCongestion
+from .observations import ObservationPrivateAndAE
+from .observations import ObservationAEOnly
+
+from .observations import TripInfoWithETAPCA
+from .observations import ObservationPrivateOnly
+from .observations import ObservationPCAOnly
+from .observations import ObservationPrivateAndTop7PCA
 
 from .environment import TrafficEnvironment

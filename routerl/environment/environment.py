@@ -1067,7 +1067,7 @@ class TrafficEnvironment(AECEnv):
                 action_masks=self.action_masks,
                 include_action_mask_in_obs=self.use_action_masks
             )
-        elif observation_type == "trip_info_with_eta_pca":
+        elif observation_type == kc.OBS_PRIVATE_AND_PCA:
             return TripInfoWithETAPCA(
                 self.machine_agents,
                 self.human_agents,
@@ -1081,7 +1081,7 @@ class TrafficEnvironment(AECEnv):
         # ==========================================
         # DODANE KLASY DO BADAŃ ABLACYJNYCH (PCA)
         # ==========================================
-        elif observation_type == "private_only":
+        elif observation_type == kc.OBS_PRIVATE_ONLY:
             return ObservationPrivateOnly(
                 self.machine_agents,
                 self.human_agents,
@@ -1091,7 +1091,7 @@ class TrafficEnvironment(AECEnv):
                 action_masks=self.action_masks,
                 include_action_mask_in_obs=self.use_action_masks
             )
-        elif observation_type == "pca_only":
+        elif observation_type == kc.OBS_PCA_ONLY:
             return ObservationPCAOnly(
                 self.machine_agents,
                 self.human_agents,
@@ -1102,7 +1102,7 @@ class TrafficEnvironment(AECEnv):
                 action_masks=self.action_masks,
                 include_action_mask_in_obs=self.use_action_masks
             )
-        elif observation_type == "private_top7":
+        elif observation_type == kc.OBS_PRIVATE_TOP7:
             return ObservationPrivateAndTop7PCA(
                 self.machine_agents,
                 self.human_agents,
@@ -1113,7 +1113,31 @@ class TrafficEnvironment(AECEnv):
                 action_masks=self.action_masks,
                 include_action_mask_in_obs=self.use_action_masks
             )
+
+        elif observation_type == kc.OBS_PRIVATE_AND_AE:
+            return ObservationPrivateAndAE(
+                self.machine_agents,
+                self.human_agents,
+                self.simulation_params,
+                self.agent_params,
+                self.get_free_flow_times(invalid_pad=1e9),
+                self.simulator,
+                action_masks=self.action_masks,
+                include_action_mask_in_obs=self.use_action_masks
+            )
+        elif observation_type == kc.OBS_AE_ONLY:
+            return ObservationAEOnly(
+                self.machine_agents,
+                self.human_agents,
+                self.simulation_params,
+                self.agent_params,
+                self.get_free_flow_times(invalid_pad=1e9),
+                self.simulator,
+                action_masks=self.action_masks,
+                include_action_mask_in_obs=self.use_action_masks
+            )
         # ==========================================
+
         else:
             raise ValueError('[MODEL INVALID] Unrecognized observation type: ' + observation_type)
 

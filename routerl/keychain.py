@@ -41,7 +41,12 @@ class Keychain:
     ROUTE_CONGESTION = "route_congestion"
     TRIP_INFO_ETA_SUMO = "trip_info_eta_sumo"
     GROUP_VICINITY = "group_vicinity"
-    TRIP_INFO_ETA_PCA = "trip_info_with_eta_pca"
+    OBS_PRIVATE_AND_PCA = "trip_info_with_eta_pca"
+    OBS_PRIVATE_AND_AE = "ObservationPrivateAndAE"
+    OBS_AE_ONLY = "ObservationAEOnly"
+    OBS_PRIVATE_ONLY = "private_only"
+    OBS_PCA_ONLY = "pca_only"
+    OBS_PRIVATE_TOP7 = "private_top7"
 
     ### Environment
     NUMBER_OF_DAYS = "number_of_days"

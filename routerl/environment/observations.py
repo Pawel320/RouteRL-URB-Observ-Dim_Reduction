@@ -1214,3 +1214,124 @@ class ObservationPrivateAndTop7PCA(TripInfoWithETAPCA):
         
         self.observations[str(agent_id)] = final_obs.copy()
         return final_obs
+
+
+
+import torch
+import torch.nn as nn
+import joblib
+
+class ObservationPrivateAndAE(TripInfoWithETASumo):
+    """
+    Prywatne cechy agenta (7) + nieliniowo skompresowane dane o ruchu z Autoenkodera (35).
+    Łączny rozmiar: 42.
+    """
+    def __init__(self, *args, latent_dim: int = 35, **kwargs) -> None:
+        self.latent_dim = latent_dim
+        
+        # Ścieżki do zapisanych plików modelu i skalera (zmień ścieżkę absolutną, jeśli to konieczne)
+        model_path = "/home/z1201158/URB_Dim_Reduction/URB/results/trained_encoder.pt"
+        scaler_path = "/home/z1201158/URB_Dim_Reduction/URB/results/scaler.pkl"
+        
+        if not os.path.exists(model_path) or not os.path.exists(scaler_path):
+            raise FileNotFoundError("Brak plików Autoenkodera! Upewnij się, że trained_encoder.pt i scaler.pkl istnieją.")
+            
+        # 1. Wczytanie skalera
+        self.scaler = joblib.load(scaler_path)
+        input_dim = self.scaler.n_features_in_  # Dynamicznie pobiera wymiar (np. 8044)
+        
+        # 2. Definicja i wczytanie architektury Kodera (musi być identyczna jak w skrypcie treningowym)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 512),
+            nn.LeakyReLU(0.1),
+            nn.Linear(512, 128),
+            nn.LeakyReLU(0.1),
+            nn.Linear(128, self.latent_dim)
+        ).to(self.device)
+        
+        self.encoder.load_state_dict(torch.load(model_path, map_location=self.device))
+        self.encoder.eval() # Wyłączamy tryb treningu (Dropout/BatchNorm)
+
+        # 3. Inicjalizacja klasy bazowej SUMO
+        super().__init__(*args, **kwargs)
+        self.OBS_SIZE = self.BASE_OBS_SIZE + self.latent_dim
+        self.observations = self.reset_observation()
+
+    def refresh_edge_metadata(self) -> None:
+        super().refresh_edge_metadata()
+        if hasattr(self, 'BASE_OBS_SIZE'):
+            self.OBS_SIZE = self.BASE_OBS_SIZE + self.latent_dim
+
+    def reset_observation(self) -> dict:
+        base_obs = super(TripInfoWithETASumo, self).reset_observation()
+        if self.edge_vec_len == 0:
+            return base_obs
+
+        obs = {}
+        for k, v in base_obs.items():
+            base_part = np.array(v, dtype=np.float32)[:self.BASE_OBS_SIZE]
+            ae_pad = np.zeros(self.latent_dim, dtype=np.float32)
+            obs[k] = np.concatenate([base_part, ae_pad])
+            
+        self.observations = obs
+        return obs
+
+    def agent_observations(self, agent_id: str, all_agents: List[Any], agent_selection: str, travel_times: List[Any]) -> np.ndarray:
+        full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
+        if self.edge_vec_len == 0:
+            return np.array(full_obs, dtype=np.float32)
+
+        # Rozdzielenie na część prywatną i gigantyczny wektor z SUMO
+        base_obs_len = len(full_obs) - self.edge_vec_len
+        base_obs = full_obs[:base_obs_len]
+        edge_vec = full_obs[base_obs_len:]
+
+        # --- MAGIA AUTOENKODERA ---
+        # 1. Normalizacja surowych krawędzi do postaci, na jakiej uczyła się sieć
+        edge_scaled = self.scaler.transform(edge_vec.reshape(1, -1)).astype(np.float32)
+        
+        # 2. Przejście przez koder PyTorcha (bez liczenia gradientów = bardzo szybko)
+        with torch.no_grad():
+            edge_tensor = torch.tensor(edge_scaled).to(self.device)
+            ae_out = self.encoder(edge_tensor).cpu().numpy().flatten()
+            
+        # 3. Sklejenie obserwacji
+        final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), ae_out]).astype(np.float32)
+        
+        self.observations[str(agent_id)] = final_obs.copy()
+        return final_obs
+
+
+class ObservationAEOnly(ObservationPrivateAndAE):
+    """
+    Tylko skompresowane dane z Autoenkodera (rozmiar: 35).
+    Ignoruje całkowicie prywatne cechy agenta (start_time, origin, ETA).
+    """
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Nadpisujemy rozmiar Gym Space na same komponenty z AE
+        self.OBS_SIZE = self.latent_dim 
+        self.observations = self.reset_observation()
+
+    def refresh_edge_metadata(self) -> None:
+        if hasattr(super(), 'refresh_edge_metadata'):
+            super().refresh_edge_metadata()
+        # Wymuszamy nasze 35 wymiarów!
+        self.OBS_SIZE = self.latent_dim
+
+    def reset_observation(self) -> dict:
+        obs = super().reset_observation()
+        for k, v in obs.items():
+            # super() zwraca: [base_obs (7) | ae_obs (35)]
+            # Ucinamy base_obs, bierzemy tylko AE
+            obs[k] = v[self.BASE_OBS_SIZE:]
+        self.observations = obs
+        return obs
+
+    def agent_observations(self, agent_id: str, all_agents: list, agent_selection: str, travel_times: list) -> np.ndarray:
+        full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
+        ae_obs = full_obs[self.BASE_OBS_SIZE:]
+        
+        self.observations[str(agent_id)] = ae_obs.copy()
+        return ae_obs
