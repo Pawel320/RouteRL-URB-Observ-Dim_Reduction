@@ -1170,7 +1170,7 @@ class TripInfoWithETAPCA(TripInfoWithETASumo):
         reduced_edge_vec = reduced[0, :self.n_components]
         final_obs = _validate_observation_size(
             np.concatenate([base_obs, reduced_edge_vec]),
-            self.OBS_SIZE,
+            self.BASE_OBS_SIZE + self.n_components,  # <--- BEZPIECZNY WYMIAR
             f"PCA observation for agent {agent_id}",
         )
         
@@ -1402,7 +1402,7 @@ class ObservationPrivateAndAE(TripInfoWithETASumo):
             
         final_obs = _validate_observation_size(
             np.concatenate([base_obs, ae_out]),
-            self.OBS_SIZE,
+            self.BASE_OBS_SIZE + self.latent_dim,  # <--- BEZPIECZNY WYMIAR
             f"Autoencoder observation for agent {agent_id}",
         )
         
