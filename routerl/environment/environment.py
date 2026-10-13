@@ -365,7 +365,6 @@ class TrafficEnvironment(AECEnv):
             kc.TRIP_INFO_ETA_ROUTE_CONGESTION,
             kc.ROUTE_CONGESTION,
             "trip_info_with_eta_pca",
-            "private_only",
             "pca_only",
             "private_top7",
             kc.OBS_PRIVATE_AND_AE,

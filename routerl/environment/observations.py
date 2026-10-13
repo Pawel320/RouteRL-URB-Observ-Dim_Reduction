@@ -52,6 +52,19 @@ def pad_invalid_freeflows_for_observation(
     return padded
 
 
+def _validate_observation_size(
+    observation: np.ndarray,
+    expected_size: int,
+    context: str,
+) -> np.ndarray:
+    observation = np.asarray(observation, dtype=np.float32)
+    if observation.shape != (expected_size,):
+        raise RuntimeError(
+            f"{context} has shape {observation.shape}; expected ({expected_size},)"
+        )
+    return observation
+
+
 def get_ema(ff_time, values, max_length=10):
     """
     Compute the exponential moving average (EMA) given the list of
@@ -1080,33 +1093,52 @@ import joblib
 
 class TripInfoWithETAPCA(TripInfoWithETASumo):
     def __init__(self, *args, n_components: int = 35, **kwargs) -> None:
+        if not isinstance(n_components, (int, np.integer)) or n_components <= 0:
+            raise ValueError(f"n_components must be a positive integer, got {n_components!r}")
+
         self.n_components = n_components
         
-        # Ładujemy model z folderu results
         pca_path = "/home/z1201158/URB_Dim_Reduction/URB/results/trained_pca_model.pkl"        
         if not os.path.exists(pca_path):
             raise FileNotFoundError(f"Brak modelu PCA: {pca_path}")
             
         self.pca = joblib.load(pca_path)
+        components = getattr(self.pca, "components_", None)
+        if components is None or np.ndim(components) != 2:
+            raise ValueError(f"PCA model at {pca_path} is not fitted or has invalid components_")
+        if self.n_components > components.shape[0]:
+            raise ValueError(
+                f"Requested {self.n_components} PCA components, but the model provides "
+                f"only {components.shape[0]}"
+            )
+        self.pca_input_size = int(components.shape[1])
+
         super().__init__(*args, **kwargs)
         self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
         self.observations = self.reset_observation()
 
-    def refresh_edge_metadata(self):
+    def refresh_edge_metadata(self) -> None:
         super().refresh_edge_metadata()
+        if self.edge_vec_len and self.edge_vec_len != self.pca_input_size:
+            raise ValueError(
+                f"SUMO edge vector has {self.edge_vec_len} features, but the PCA model "
+                f"expects {self.pca_input_size}"
+            )
         if hasattr(self, 'BASE_OBS_SIZE'):
             self.OBS_SIZE = self.BASE_OBS_SIZE + self.n_components
 
     def reset_observation(self) -> dict:
         base_obs = super(TripInfoWithETASumo, self).reset_observation()
-        if self.edge_vec_len == 0:
-            return base_obs
-
         obs = {}
         for k, v in base_obs.items():
             base_part = np.array(v, dtype=np.float32)[:self.BASE_OBS_SIZE]
+            _validate_observation_size(base_part, self.BASE_OBS_SIZE, f"Base observation for agent {k}")
             pca_pad = np.zeros(self.n_components, dtype=np.float32)
-            obs[k] = np.concatenate([base_part, pca_pad])
+            obs[k] = _validate_observation_size(
+                np.concatenate([base_part, pca_pad]),
+                self.BASE_OBS_SIZE + self.n_components,
+                f"Reset PCA observation for agent {k}",
+            )
             
         self.observations = obs
         return obs
@@ -1114,15 +1146,33 @@ class TripInfoWithETAPCA(TripInfoWithETASumo):
     def agent_observations(self, agent_id: str, all_agents: List[Any], agent_selection: str, travel_times: List[Any]) -> np.ndarray:
         full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
         if self.edge_vec_len == 0:
-            return np.array(full_obs, dtype=np.float32)
+            raise RuntimeError(
+                "Cannot compute a PCA observation because SUMO edge metadata is empty. "
+                "Ensure the simulator has started and edge metadata has been refreshed."
+            )
+
+        full_obs = _validate_observation_size(
+            full_obs,
+            self.BASE_OBS_SIZE + self.edge_vec_len,
+            f"SUMO observation for agent {agent_id}",
+        )
 
         base_obs_len = len(full_obs) - self.edge_vec_len
         base_obs = full_obs[:base_obs_len]
         edge_vec = full_obs[base_obs_len:]
 
-        # Transformacja PCA w locie
-        reduced_edge_vec = self.pca.transform(edge_vec.reshape(1, -1)).flatten().astype(np.float32)
-        final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), reduced_edge_vec]).astype(np.float32)
+        reduced = np.asarray(self.pca.transform(edge_vec.reshape(1, -1)), dtype=np.float32)
+        if reduced.ndim != 2 or reduced.shape[0] != 1 or reduced.shape[1] < self.n_components:
+            raise RuntimeError(
+                f"PCA returned shape {reduced.shape}; expected one row with at least "
+                f"{self.n_components} components"
+            )
+        reduced_edge_vec = reduced[0, :self.n_components]
+        final_obs = _validate_observation_size(
+            np.concatenate([base_obs, reduced_edge_vec]),
+            self.OBS_SIZE,
+            f"PCA observation for agent {agent_id}",
+        )
         
         self.observations[str(agent_id)] = final_obs.copy()
         return final_obs
@@ -1133,16 +1183,15 @@ class TripInfoWithETAPCA(TripInfoWithETASumo):
 
 class ObservationPrivateOnly(TripInfoWithETAMaskNorm):
     """
-    Tylko prywatne dane agenta (rozmiar bazowy: zazwyczaj 7).
-    Dziedziczy z TripInfoWithETAMaskNorm, dzięki czemu w ogóle nie ładuje 
-    modelu PCA ani globalnych krawędzi SUMO (działa najszybciej).
+    Uses only the base agent observation: route ETAs, OD/time data, and an
+    optional action mask. It does not load a compression model or SUMO edge state.
     """
     pass
 
 class ObservationPCAOnly(TripInfoWithETAPCA):
     """
-    Tylko skompresowane dane PCA ze środowiska (rozmiar: 35).
-    Ignoruje całkowicie prywatne cechy agenta (start_time, origin, ETA).
+    Uses only the PCA components of the SUMO edge state (35 by default),
+    omitting the base agent observation.
     """
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -1151,24 +1200,27 @@ class ObservationPCAOnly(TripInfoWithETAPCA):
         self.observations = self.reset_observation()
 
     def refresh_edge_metadata(self) -> None:
-        # Pozwalamy klasie bazowej odświeżyć graf krawędzi SUMO
-        if hasattr(super(), 'refresh_edge_metadata'):
-            super().refresh_edge_metadata()
-        # BLOKADA: Zabraniamy powrotu do 42 wymiarów i wymuszamy nasze 35!
+        super().refresh_edge_metadata()
         self.OBS_SIZE = self.n_components
 
     def reset_observation(self) -> dict:
         obs = super().reset_observation()
         for k, v in obs.items():
-            # super() zwraca: [base_obs (7) | pca_obs (35)]
-            # Ucinamy base_obs, bierzemy tylko PCA
-            obs[k] = v[self.BASE_OBS_SIZE:]
+            obs[k] = _validate_observation_size(
+                v[self.BASE_OBS_SIZE:],
+                self.n_components,
+                f"PCA-only reset observation for agent {k}",
+            )
         self.observations = obs
         return obs
 
     def agent_observations(self, agent_id: str, all_agents: list, agent_selection: str, travel_times: list) -> np.ndarray:
         full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
-        pca_obs = full_obs[self.BASE_OBS_SIZE:]
+        pca_obs = _validate_observation_size(
+            full_obs[self.BASE_OBS_SIZE:],
+            self.OBS_SIZE,
+            f"PCA-only observation for agent {agent_id}",
+        )
         
         self.observations[str(agent_id)] = pca_obs.copy()
         return pca_obs
@@ -1176,24 +1228,26 @@ class ObservationPCAOnly(TripInfoWithETAPCA):
 
 class ObservationPrivateAndTop7PCA(TripInfoWithETAPCA):
     """
-    Prywatne cechy (7) + tylko 7 najważniejszych komponentów PCA. Łączny rozmiar: 14.
+    Combines the base agent observation with the first seven PCA components.
+    The resulting size is BASE_OBS_SIZE + 7.
     """
     def __init__(self, *args, **kwargs) -> None:
-        # 1. NAJPIERW DEKLARUJESZ ZMIENNĄ (naprawia AttributeError)
-        self.top_n = 7 
-        
-        # 2. WYWOŁUJESZ KONSTRUKTOR BAZOWY
+        self.top_n = 7
+        requested_components = kwargs.get("n_components", 35)
+        if (
+            isinstance(requested_components, (int, np.integer))
+            and requested_components < self.top_n
+        ):
+            raise ValueError(
+                f"Top-{self.top_n} PCA observation requires at least {self.top_n} "
+                f"components, got {requested_components}"
+            )
         super().__init__(*args, **kwargs)
-        
-        # 3. ZMIENIASZ ROZMIAR (Prywatne 7 + Top 7 = 14)
         self.OBS_SIZE = self.BASE_OBS_SIZE + self.top_n
         self.observations = self.reset_observation()
 
     def refresh_edge_metadata(self) -> None:
-        if hasattr(super(), 'refresh_edge_metadata'):
-            super().refresh_edge_metadata()
-            
-        # ZABEZPIECZENIE: Zmieniamy wymiar tylko, jeśli konstruktor bazy już utworzył tę zmienną
+        super().refresh_edge_metadata()
         if hasattr(self, 'BASE_OBS_SIZE'):
             self.OBS_SIZE = self.BASE_OBS_SIZE + self.top_n
 
@@ -1202,7 +1256,11 @@ class ObservationPrivateAndTop7PCA(TripInfoWithETAPCA):
         for k, v in obs.items():
             base = v[:self.BASE_OBS_SIZE]
             pca_top = v[self.BASE_OBS_SIZE : self.BASE_OBS_SIZE + self.top_n]
-            obs[k] = np.concatenate([base, pca_top])
+            obs[k] = _validate_observation_size(
+                np.concatenate([base, pca_top]),
+                self.BASE_OBS_SIZE + self.top_n,
+                f"Private + top-{self.top_n} PCA reset observation for agent {k}",
+            )
         self.observations = obs
         return obs
 
@@ -1210,7 +1268,11 @@ class ObservationPrivateAndTop7PCA(TripInfoWithETAPCA):
         full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
         base = full_obs[:self.BASE_OBS_SIZE]
         pca_top = full_obs[self.BASE_OBS_SIZE : self.BASE_OBS_SIZE + self.top_n]
-        final_obs = np.concatenate([base, pca_top])
+        final_obs = _validate_observation_size(
+            np.concatenate([base, pca_top]),
+            self.OBS_SIZE,
+            f"Private + top-{self.top_n} PCA observation for agent {agent_id}",
+        )
         
         self.observations[str(agent_id)] = final_obs.copy()
         return final_obs
@@ -1223,10 +1285,12 @@ import joblib
 
 class ObservationPrivateAndAE(TripInfoWithETASumo):
     """
-    Prywatne cechy agenta (7) + nieliniowo skompresowane dane o ruchu z Autoenkodera (35).
-    Łączny rozmiar: 42.
+    Combines the base agent observation with nonlinear Autoencoder features.
+    The resulting size is BASE_OBS_SIZE + latent_dim.
     """
     def __init__(self, *args, latent_dim: int = 35, **kwargs) -> None:
+        if not isinstance(latent_dim, (int, np.integer)) or latent_dim <= 0:
+            raise ValueError(f"latent_dim must be a positive integer, got {latent_dim!r}")
         self.latent_dim = latent_dim
         
         # Ścieżki do zapisanych plików modelu i skalera (zmień ścieżkę absolutną, jeśli to konieczne)
@@ -1238,18 +1302,25 @@ class ObservationPrivateAndAE(TripInfoWithETASumo):
             
         # 1. Wczytanie skalera
         self.scaler = joblib.load(scaler_path)
-        input_dim = self.scaler.n_features_in_  # Dynamicznie pobiera wymiar (np. 8044)
+        input_dim = getattr(self.scaler, "n_features_in_", None)
+        if not isinstance(input_dim, (int, np.integer)) or input_dim <= 0:
+            raise ValueError(
+                f"Scaler at {scaler_path} must be fitted and expose a positive "
+                "n_features_in_ value"
+            )
+        self.encoder_input_size = int(input_dim)
         
-        # 2. Definicja i wczytanie architektury Kodera (musi być identyczna jak w skrypcie treningowym)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+       # 2. Definicja i wczytanie architektury Kodera (wymuszamy CPU)
+        self.device = torch.device("cpu")
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 512),
             nn.LeakyReLU(0.1),
             nn.Linear(512, 128),
             nn.LeakyReLU(0.1),
             nn.Linear(128, self.latent_dim)
-        ).to(self.device)
+        )
         
+        # Ładujemy wagi bezpośrednio do pamięci RAM (CPU)
         self.encoder.load_state_dict(torch.load(model_path, map_location=self.device))
         self.encoder.eval() # Wyłączamy tryb treningu (Dropout/BatchNorm)
 
@@ -1260,19 +1331,26 @@ class ObservationPrivateAndAE(TripInfoWithETASumo):
 
     def refresh_edge_metadata(self) -> None:
         super().refresh_edge_metadata()
+        if self.edge_vec_len and self.edge_vec_len != self.encoder_input_size:
+            raise ValueError(
+                f"SUMO edge vector has {self.edge_vec_len} features, but the scaler "
+                f"expects {self.encoder_input_size}"
+            )
         if hasattr(self, 'BASE_OBS_SIZE'):
             self.OBS_SIZE = self.BASE_OBS_SIZE + self.latent_dim
 
     def reset_observation(self) -> dict:
         base_obs = super(TripInfoWithETASumo, self).reset_observation()
-        if self.edge_vec_len == 0:
-            return base_obs
-
         obs = {}
         for k, v in base_obs.items():
             base_part = np.array(v, dtype=np.float32)[:self.BASE_OBS_SIZE]
+            _validate_observation_size(base_part, self.BASE_OBS_SIZE, f"Base observation for agent {k}")
             ae_pad = np.zeros(self.latent_dim, dtype=np.float32)
-            obs[k] = np.concatenate([base_part, ae_pad])
+            obs[k] = _validate_observation_size(
+                np.concatenate([base_part, ae_pad]),
+                self.BASE_OBS_SIZE + self.latent_dim,
+                f"Reset autoencoder observation for agent {k}",
+            )
             
         self.observations = obs
         return obs
@@ -1280,24 +1358,53 @@ class ObservationPrivateAndAE(TripInfoWithETASumo):
     def agent_observations(self, agent_id: str, all_agents: List[Any], agent_selection: str, travel_times: List[Any]) -> np.ndarray:
         full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
         if self.edge_vec_len == 0:
-            return np.array(full_obs, dtype=np.float32)
+            raise RuntimeError(
+                "Cannot compute an autoencoder observation because SUMO edge metadata "
+                "is empty. Ensure the simulator has started and edge metadata has been refreshed."
+            )
+
+        full_obs = _validate_observation_size(
+            full_obs,
+            self.BASE_OBS_SIZE + self.edge_vec_len,
+            f"SUMO observation for agent {agent_id}",
+        )
 
         # Rozdzielenie na część prywatną i gigantyczny wektor z SUMO
         base_obs_len = len(full_obs) - self.edge_vec_len
         base_obs = full_obs[:base_obs_len]
         edge_vec = full_obs[base_obs_len:]
 
-        # --- MAGIA AUTOENKODERA ---
-        # 1. Normalizacja surowych krawędzi do postaci, na jakiej uczyła się sieć
-        edge_scaled = self.scaler.transform(edge_vec.reshape(1, -1)).astype(np.float32)
+        if edge_vec.shape != (self.encoder_input_size,):
+            raise RuntimeError(
+                f"SUMO edge vector has shape {edge_vec.shape}; expected "
+                f"({self.encoder_input_size},)"
+            )
+
+        edge_scaled = np.asarray(
+            self.scaler.transform(edge_vec.reshape(1, -1)),
+            dtype=np.float32,
+        )
+        if edge_scaled.shape != (1, self.encoder_input_size):
+            raise RuntimeError(
+                f"Scaler returned shape {edge_scaled.shape}; expected "
+                f"(1, {self.encoder_input_size})"
+            )
         
-        # 2. Przejście przez koder PyTorcha (bez liczenia gradientów = bardzo szybko)
         with torch.no_grad():
-            edge_tensor = torch.tensor(edge_scaled).to(self.device)
-            ae_out = self.encoder(edge_tensor).cpu().numpy().flatten()
+            edge_tensor = torch.tensor(edge_scaled, dtype=torch.float32)
+            encoded = self.encoder(edge_tensor)
+            if encoded.shape != (1, self.latent_dim):
+                raise RuntimeError(
+                    f"Encoder returned shape {tuple(encoded.shape)}; expected "
+                    f"(1, {self.latent_dim})"
+                )
+            ae_out = encoded.numpy().reshape(-1)
             
-        # 3. Sklejenie obserwacji
-        final_obs = np.concatenate([np.array(base_obs, dtype=np.float32), ae_out]).astype(np.float32)
+        final_obs = _validate_observation_size(
+            np.concatenate([base_obs, ae_out]),
+            self.OBS_SIZE,
+            f"Autoencoder observation for agent {agent_id}",
+        )
         
         self.observations[str(agent_id)] = final_obs.copy()
         return final_obs
@@ -1305,8 +1412,8 @@ class ObservationPrivateAndAE(TripInfoWithETASumo):
 
 class ObservationAEOnly(ObservationPrivateAndAE):
     """
-    Tylko skompresowane dane z Autoenkodera (rozmiar: 35).
-    Ignoruje całkowicie prywatne cechy agenta (start_time, origin, ETA).
+    Uses only the Autoencoder latent vector (35 dimensions by default),
+    omitting the base agent observation.
     """
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -1315,23 +1422,27 @@ class ObservationAEOnly(ObservationPrivateAndAE):
         self.observations = self.reset_observation()
 
     def refresh_edge_metadata(self) -> None:
-        if hasattr(super(), 'refresh_edge_metadata'):
-            super().refresh_edge_metadata()
-        # Wymuszamy nasze 35 wymiarów!
+        super().refresh_edge_metadata()
         self.OBS_SIZE = self.latent_dim
 
     def reset_observation(self) -> dict:
         obs = super().reset_observation()
         for k, v in obs.items():
-            # super() zwraca: [base_obs (7) | ae_obs (35)]
-            # Ucinamy base_obs, bierzemy tylko AE
-            obs[k] = v[self.BASE_OBS_SIZE:]
+            obs[k] = _validate_observation_size(
+                v[self.BASE_OBS_SIZE:],
+                self.latent_dim,
+                f"Autoencoder-only reset observation for agent {k}",
+            )
         self.observations = obs
         return obs
 
     def agent_observations(self, agent_id: str, all_agents: list, agent_selection: str, travel_times: list) -> np.ndarray:
         full_obs = super().agent_observations(agent_id, all_agents, agent_selection, travel_times)
-        ae_obs = full_obs[self.BASE_OBS_SIZE:]
+        ae_obs = _validate_observation_size(
+            full_obs[self.BASE_OBS_SIZE:],
+            self.OBS_SIZE,
+            f"Autoencoder-only observation for agent {agent_id}",
+        )
         
         self.observations[str(agent_id)] = ae_obs.copy()
         return ae_obs
